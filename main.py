@@ -1,0 +1,106 @@
+"""AI Account Hub source and frozen-application entry point.
+
+Thin entry point so the app can be started with ``py -3 main.py`` from the repo
+root. The real bootstrap lives in :mod:`ai_account_hub.app`. Equivalent to
+``python -m ai_account_hub``; standalone packagers should target this file too.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import os
+import sys
+import traceback
+from pathlib import Path
+
+# Make the package importable from a source checkout. Frozen builds already
+# include the package, so inserting their resolved entry directory is harmless.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+
+def _log_path() -> Path:
+    configured = os.environ.get("AI_HUB_LAUNCH_LOG", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    launcher_root = os.environ.get("AI_HUB_LAUNCHER_ROOT", "").strip()
+    root = Path(launcher_root).expanduser() if launcher_root else Path.home() / ".codex-account-launcher"
+    return root / "logs" / "ai-account-hub.log"
+
+
+def _record_exception(exc_type, value, tb) -> Path:
+    target = _log_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as handle:
+            stamp = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+            handle.write(f"\n[{stamp}] Unhandled AI Account Hub error\n")
+            traceback.print_exception(exc_type, value, tb, file=handle)
+    except OSError:
+        pass
+    return target
+
+
+def _exception_hook(exc_type, value, tb) -> None:
+    target = _record_exception(exc_type, value, tb)
+    if sys.stderr is not None:
+        traceback.print_exception(exc_type, value, tb)
+        return
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                f"AI Account Hub stopped because of an error.\n\nDetails: {target}",
+                "AI Account Hub",
+                0x10,
+            )
+        except Exception:
+            pass
+
+
+def _run() -> int:
+    sys.excepthook = _exception_hook
+    try:
+        from ai_account_hub.app import main
+
+        return int(main())
+    except BaseException:
+        exc_type, value, tb = sys.exc_info()
+        _exception_hook(exc_type, value, tb)
+        return 1
+
+
+def _smoke_test() -> int:
+    """Validate imports and frozen resources without opening the GUI."""
+
+    try:
+        import ai_account_hub
+        from ai_account_hub import data
+        from ai_account_hub.core import hub_core
+        from ai_account_hub.ui import main_window
+
+        app_root = Path(main_window.__file__).resolve().parents[2]
+        required = (
+            data.ASSETS_DIR / "hub-icon.png",
+            data.ASSETS_DIR / "codex-icon.png",
+            data.ASSETS_DIR / "claude-icon.png",
+            hub_core.HELPER_PATH,
+            app_root / "README.md",
+            app_root / "RELEASE_NOTES.md",
+            app_root / "docs" / "ARCHITECTURE.md",
+        )
+        missing = [str(path) for path in required if not path.is_file()]
+        if missing:
+            raise RuntimeError("Missing packaged resources: " + ", ".join(missing))
+        expected_version = os.environ.get("AI_HUB_EXPECTED_VERSION", "").strip()
+        if expected_version and ai_account_hub.__version__ != expected_version:
+            raise RuntimeError(f"Unexpected package version: {ai_account_hub.__version__}")
+        return 0
+    except Exception:
+        if sys.stderr is not None:
+            traceback.print_exc()
+        return 2
+
+if __name__ == "__main__":
+    raise SystemExit(_smoke_test() if "--smoke-test" in sys.argv else _run())
